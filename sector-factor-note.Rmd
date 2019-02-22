@@ -2,20 +2,27 @@
 title: "Sector Factor Note"
 output:
   word_document: default
+  html_notebook: default
 ---
 
 
 ```{r setup, include = FALSE, message=FALSE, warning=FALSE}
+
+
 knitr::opts_chunk$set(message=FALSE, warning=FALSE, comment = NA)
 library(tidyverse)
 library(broom)
-library(tibbletime)
 library(tidyquant)
+
 ```
 
 In this Reproducible Finance note, we will review and walk through the R code for importing price data from CSV, coercing it to monthly returns data, and then running a Fama French (FF) factor model on the data. That will also necessitate importing and wrangling the FF data before running the model and visualizing the results. The goal of this note is to introduce some useful and reuseable R code for taking two data sets, joining them together and then running a model. The work here is not overly complex but it should serve as a good starting point for more involved work in the future.
 
-First, let's load up our packages that we will need for the project. If you are unfamiliar with R, packages are a crucial part of the ecosystem. They contain useful and intuitive functions that save us from having to write our functions in base R. 
+This post was written using Rmarkdown, an R format that can creat PDFs, HTML reports or Word documents. If you wish to download the full script that was used for this note, you can do so here: 
+
+www.reproduciblefinance.com/2019/03/05/sector-factor-jfds/
+
+Let's get started by loading the packages that we will need for today's work. If you are unfamiliar with R, packages are a crucial part of the ecosystem. They contain useful and intuitive functions that save us from having to write our own functions in base R. 
 
 We will be using the following packages.
 
@@ -44,17 +51,16 @@ etf_ticker_sector
 
 We could import price data on those ETFs from a source like Factset or Bloomberg, but to make this fully reproducible, I have saved the price data as a CSV file that can be downloaded.
 
-To import the data into our working environment, we will use the `read_csv()` function and download directly from the website where I stored this data.
+To import the data into our working environment, we will use the `read_csv()` function and download directly from the server where I stored this data.
 
 
 ```{r}
 sector_prices_2000_2018 <- 
 read_csv("https://colorado.rstudio.com/rsc/content/2138/sector_prices_2000_2018.csv") %>% 
-select(-X1) %>% 
 group_by(sector)
 ```
 
-Next let's use the `slice()` function to glance at the first price observation for each of the sectors, to confirm that the data looks how we were expecting it to look. Note that the first date is December 29, 1999. I set that as the start date because we eventually want to capture the monthly return of January 2000 and we will index that off of the last day of December 1999.
+Next let's use the`dplyr` package and the `slice()` function to glance at the first price observation for each of the sectors, to confirm that the data looks how we were expecting it to look. Note that the first date is December 29, 1999. I set that as the start date because we eventually want to capture the monthly return of January 2000 and we will index that off of the last day of December 1999.
 
 ```{r}
 sector_prices_2000_2018 %>% 
@@ -62,37 +68,39 @@ sector_prices_2000_2018 %>%
 ```
 
 
-The ultimate goal is to regress the monthly sector returns on the the Fama French factors, so let's coerce this daily price data to monthly price data.  
+The ultimate goal is to regress the monthly sector returns on 5 Fama French monthly factors, so let's coerce this daily price data to monthly price data.  
 
-For that task, we use `as_period(period = "month", side = "end")`, which will convert our data to monthly, indexed at the end of each month.  
+For that task, we use `tq_mutate` from the `tidyquant` package and set `mutate_fun = to.period, period = "months"`, which will convert our data to monthly, indexed at the end of each month.  
 
-With our data converted to monthly, we can calculate monthly returns using `mutate(monthly_return = log(adjClose) - log(lag(adjClose)`. The `mutate()` function adds a new column to the data and we set the name of the new column to be `monthly_returns`. We calculate monthly returns as th log of the adjusted close on the final day of the current month, minus the log of the adjusted close on the final day of the previous month. This is for illustration purposes - your team might choose to use a price other than adjusted close and different date periodicities.
+With our data converted to monthly, we can calculate monthly returns using `mutate(monthly_return = log(adjClose) - log(lag(adjClose)`. The `mutate()` function, from the `dplyr` pacakge, adds a new column to the data and we set the name of the new column to be `monthly_return`. We calculate monthly returns as th log of the adjusted close on the final day of the current month, minus the log of the adjusted close on the final day of the previous month. This is for illustration purposes - your team might choose to use a price other than adjusted close and different date periodicities.
 
 ```{r}
 sector_monthly_returns_2000_2018 <-
-sector_prices_2000_2018 %>% 
-  as_tbl_time(index = date) %>% 
-  as_period(period = "month", side = "end") %>% 
+sector_prices_2000_2018 %>%
+  tq_transmute(select     = adjClose, 
+               mutate_fun = to.period, 
+               period     = "months",
+               indexAt    = "lastof") %>% 
   mutate(monthly_return = log(adjClose) - log(lag(adjClose))) %>% 
   na.omit() 
 
 sector_monthly_returns_2000_2018 %>% 
-  slice(1)
+  head()
 ```
 
 We now have monthly returns for our sectors, starting in January of 2000.
 
-Next we need to import Fama French factor data and, luckily, FF make their factor data available on their website.
+Next we need to import Fama French (FF) factor data and, luckily, FF make their factor data available on their website.
 
 Have a look at the website where the factor data is available.
 
 http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
 
-The data are packaged as zip files so we will need to do a bit more than call `read_csv()`.
+The factor data are packaged as zip files so we will need to do a bit more than call `read_csv()`.
 
 We will use the `tempfile()` function from base R to create a variable called `temp`, and will store the zipped file there.
 
-Then we invoke `download.file()` and pass it the URL address of the zip, which is “http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/Global_5_Factors_CSV.zip”.
+Then we invoke `download.file()` and pass it the URL address of the zip for the monthlyr global factors, which is “http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/Global_5_Factors_CSV.zip”.
 
 ```{r}
 temp <- tempfile()
@@ -111,9 +119,9 @@ Global_5_Factors <-
   rename(date = X1)
 ```
 
-That loads the data into our environment but we need to do some wrangling to get this raw data into a format that we can join with our monthly returns data. 
+That loads the data into our environment but we need to do some wrangling to get this raw data into a format that we can join with our monthly returns data. When joining disparate financial data sets, we often need to use the date column and that means ensuring a common format.
 
-Have a look at the date column.
+Have a look at the date column for our FF factor data.
 
 ```{r}
 Global_5_Factors %>% 
@@ -123,8 +131,7 @@ Global_5_Factors %>%
 
 We want to join this data to our monthly returns using the date column, and that means we want the factor date to be in the same format as our monthly returns, but it's currently in a character string with the format `1990007` instead of `1990-07-31`. 
 
-We can call `mutate(date = ymd(parse_date_time(date, "%Y%m")))` to make this transformation. 
-
+We can transform that string of numbers into data formate with a call to `mutate(date = ymd(parse_date_time(date, "%Y%m")))`. The workhorse is the `parse_date_time()` function from the `lubridate` package. 
 
 ```{r}
 Global_5_Factors %>%
@@ -132,15 +139,16 @@ Global_5_Factors %>%
   head()
 ```
 
-That worked well for the date column, but note that all our factor columns have been read in as character strings and we want them to be numeric, and we also want to coerce our date to be indexed at the end of the month, not at the beginning. Here's the code flow to make those transformations. We use the `ceiling_date()` function to change the index to the end of the month.
+That worked well for the date column, but note that all our factor columns have been read in as character strings (that why it says `<chr>` in the data frame above) and we want them to be numeric. We also need to coerce our date to be indexed at the end of the month because that's how our returns data is indexed. 
+
+We coerce our character columns to numeric columns with `mutate_if(is.character, as.numeric)` and we change the index to the end of the month with `ceiling_date(date, unit = "month")`.
 
 ```{r}
 Global_5_Factors_for_join <- 
   Global_5_Factors %>%
   mutate(date = ymd(parse_date_time(date, "%Y%m"))) %>% 
-  mutate_at(vars(-date), as.numeric) %>% 
-  mutate_if(is.numeric, funs(. / 100)) %>% 
-  as_tbl_time(index = date) %>%
+  mutate_if(is.character, as.numeric) %>% 
+  mutate_if(is.numeric, funs(. / 100)) %>%
   mutate(date = ceiling_date(date, unit = "month") - days(1)) %>% 
   rename(MKT = `Mkt-RF`)
 
@@ -148,54 +156,61 @@ Global_5_Factors_for_join %>%
   head()
 ```
 
-The data frame looks good now, but that was quite a bit of work to add a nicely formatted date, indexed to the end of the month and with numeric instead of character data in the other columns.  Now is a good time to note that manipulating and cleaning dates is a crucial and often time-consuming part of financial data work, especially when a project involves mashing together disparate data sets.  The more comfortable and efficient we can get at transforming and aligning dates, the more quickly we can start to work with new and interesting data sources.  
+The data frame looks good now, but that was quite a bit of work to add a nicely formatted date, indexed to the end of the month and with numeric instead of character data in the other columns.  Now is a good time to note that manipulating and cleaning dates is a crucial and often time-consuming part of financial data work, especially when a project involves mashing together data sets from different sources.  The more comfortable and efficient we can get at transforming and aligning dates, the more quickly we can start to work with new and interesting data sources.  
 
-We now have the Fama French factors going back to 1990 and the next task is to regress our sector monthly returns on those factors. Let's use `left_join()` to combine our sector monthly returns data with our factors data, and use the `by = "date"` argument so that only the factor and returns observations with the same dates will remain in the data frame. 
+We now have the Fama French factors going back to 1990 and the next task is to regress our sector monthly returns on those factors. The first step is to combine our sector monthly returns data with our factors data into one data object. We will join the data sets by their common piece of data, the `date` column. From a code perspective, we call `left_join(by = "date")`, so that only the factor and returns observations with the same dates will remain in the data frame. 
 
 ```{r}
 sector_factor_data_joined <- 
 sector_monthly_returns_2000_2018 %>% 
-  left_join(Global_5_Factors_for_join, by = "date") 
-
-sector_factor_data_joined %>% 
-  select(-ticker, -adjClose) %>% 
-  slice(1)
+  left_join(Global_5_Factors_for_join, by = "date")
 ```
 
-Our data is now in a nicely structured data frame, with our sector names in one column, our sector returns in a separate column, and each of the Fama French factors in a separate column. From here, we want to run our factor analysis, which we do by regressing our monthly returns on the 5 factors. 
+Here is a look at just the `date`, `monthly_returns` and factors from our joined data object. 
 
-For this exercise, let's run the regression on just the `Financials` sectors by first calling `filter(sector == Financials)`. If you wish to reproduce this work but run the regression on a different sector, you can change the code to `filter(sector == your sector of choice)`.
+```{r}
+sector_factor_data_joined %>%
+  ungroup() %>% 
+ select(-sector,  -adjClose, -RF)
+```
 
-After filtering, we use `do(model = lm(monthly_return ~ Mkt + SMB + HML + RMW + CMA))` to run our regression. 
+Our data is now in a nicely structured data frame, grouped by sector, with sector monthly returns in one column, and each of the Fama French factors in a separate column. From here, we want to run our factor analysis, which we do by regressing our monthly returns on the 5 factors. 
+
+For this exercise, let's run the regression on just the `Financials` and `Energy` sectors by first calling `filter(sector == "Financials" | sector == "Energy")`. If you wish to reproduce this work but run the regression on a different sector, you can change the code to `filter(sector == your sector of choice)`.
+
+After filtering, we use `group_map()` (a brand new function added to the `dplyr` package in February of 2019) which allows us to apply a function to each group. In this case each of sectors is a group, we will run a regression on the `Financials` group and the `Energy` group.
+
+We then pass `~lm(monthly_return ~ MKT + SMB + HML + RMW + CMA)` to run the regression and extract the model results, with coefficient confidence intervals, using `tidy(conf.int = T, conf.level = .95)`.
 
 
 ```{r}
-
-sector_factor_data_joined %>% 
-  filter(sector == "Financials") %>% 
-  do(model = lm(monthly_return ~ MKT + SMB + HML + RMW + CMA, 
-                data = .))
-```
-
-That worked, but the results of our 5-factor regression are stored as an `S3` object, which can be hard to access. To clean up the results, and add confidence intervals for our beta estimates, we call `tidy(model, conf.int = T, conf.level = .95)` and rename a couple of columns for convenience.
-
-```{r}
-ff_results <-
-sector_factor_data_joined %>% 
-  filter(sector == "Financials") %>% 
-  do(model = lm(monthly_return ~ MKT + SMB + HML + RMW + CMA, 
-                data = .)) %>% 
-  tidy(model, conf.int = T, conf.level = .95) %>% 
+ff_results <- 
+  sector_factor_data_joined %>%
+  filter(sector == "Financials" | sector == "Energy") %>%
+  group_map(~lm(monthly_return ~ MKT + SMB + HML + RMW + CMA, 
+                data = .x) 
+            %>% tidy(conf.int = T, conf.level = .95)) %>% 
   rename(coefficient = estimate, factor = term)
-
-ff_results
 ```
 
-Let's finish our work with a chart, showing the coefficient estimates and confidence intervals for our factors. We will use `ggplot()` to build this charting mapping our factor names to the x-axis and our coefficients to the y-axis with `aes(x = factor, y = coefficient)`. Let's place a point for each coefficient by calling `geom_point()` and add confidence intervals with `geom_errorbar()`.
+We just ran the FF model on two sectors, but this code flow could be scaled to easily accommodate dozens of groupings or classifications of assets to be modeled.
+
+Let's take a look at just the results for `Financials` sector.
+
+```{r}
+ff_results %>%
+  filter(sector == "Financials") %>% 
+  select(coefficient, conf.low, conf.high, p.value) %>% 
+  mutate_if(is.numeric, ~round(., 4))
+```
+
+
+We can finish our work with a couple of charts. Let's first show the coefficients and confidence intervals for our model of the `Financials` sector. We will use `ggplot()` to build this charting mapping our factor names to the x-axis and our coefficients to the y-axis with `aes(x = factor, y = coefficient)`. Let's place a point for each coefficient by calling `geom_point()` and add confidence intervals with `geom_errorbar()`.
 
 ```{r}
 ff_results %>% 
-filter(factor != "(Intercept)") %>% 
+filter(sector == "Financials" & 
+         factor != "(Intercept)") %>% 
   ggplot(aes(x = factor, 
              y = coefficient, 
              shape = factor, 
@@ -214,6 +229,29 @@ filter(factor != "(Intercept)") %>%
 
 We can glance at this and quickly see that the MKT and HML factors have positive coefficients near 1, whereas both RMW and SMB have negative coefficients.  
 
-Remember that we ran the regression on the `Financials` sector but we have monthly returns for several more ETFs. We could expand this work by filtering on a different sector or by adding more factors to the data frame before running the regression. We could also convert our regression model to a rolling regression, to see where we might have missed any significant regime or market shifts, and then visualize our rolling factor coefficients.
+If we wish to chart both sectors, we can use `facet_wrap(~sector)` to create two charts.
 
-We hope that this short note provided some useful R code and some data wrangling functions that might save some time when different date formats confront you. Thanks for reading. 
+```{r}
+ff_results %>% 
+filter(
+         factor != "(Intercept)") %>% 
+  ggplot(aes(x = factor, 
+             y = coefficient, 
+             shape = factor, 
+             color = factor)) + 
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, 
+                    ymax = conf.high)) +
+  labs(title = "FF 5-Factor Betas with Conf Intervals",
+       x = "",
+       y = "coefficients",
+       caption = "data source: Fama-French website") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.caption  = element_text(hjust = 0)) +
+  facet_wrap(~sector)
+```
+
+Remember that we ran the regression on the `Financials` and `Energy` sectors but we have monthly returns for several more ETFs. We could expand this work by filtering on a different sector or by adding more custom factors to the data frame before running the regression. We could also convert our regression model to a rolling regression, to see where we might have missed any significant regime or market shifts, and then visualize our rolling factor coefficients (possibly a good subject for next time).
+
+We hope that this short note on Reproducible Finance was an interesting glimpse into the world of R coding, date wrangling and modeling with disparate data sets. Thanks for reading. 

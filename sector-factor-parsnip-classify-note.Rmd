@@ -7,8 +7,6 @@ output:
 
 
 ```{r setup, include = FALSE, message=FALSE, warning=FALSE}
-
-
 knitr::opts_chunk$set(message=FALSE, warning=FALSE, comment = NA)
 library(tidyverse)
 library(broom)
@@ -99,6 +97,20 @@ sector_monthly_returns_2000_2018 %>%
 ```
 
 We now have monthly returns for our sectors, starting in January of 2000, saved in a data object called `sector_monthly_returns_2000_2018`.
+
+Let's split this into data for 2000 - 2017 and for 2018, in case we need a hold out set for validation later. 
+
+```{r}
+sector_monthly_returns_2000_2017 <- 
+  sector_monthly_returns_2000_2018 %>% 
+  filter(date < "2018-01-01")
+
+sector_monthly_returns_2018 <- 
+  sector_monthly_returns_2000_2018 %>% 
+  filter(date >= "2018-01-01")
+```
+
+
 Next we need to import the Fama French (FF) factor data and, luckily, FF make their factor data available on their website.[^2]
 
 [^2]: http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
@@ -169,7 +181,7 @@ We now have the Fama French factor cleaned and saved in an object called `Global
 
 ```{r}
 sector_factor_data_joined <- 
-sector_monthly_returns_2000_2018 %>% 
+sector_monthly_returns_2000_2017 %>% 
   left_join(Global_5_Factors_for_join, by = "date")
 ```
 
@@ -258,6 +270,209 @@ filter(
   facet_wrap(~sector) 
 ```
 
-Remember that we ran the regression on the `Financials` and `Energy` sectors but we have monthly returns for several more ETFs. We could expand this work by filtering on a different sector or by adding more custom factors to the data frame before running the regression - that would probably require creating the factors and making sure the dates align. We could also convert our regression model to a rolling regression, to see where we might have missed any significant regime or market shifts, and then visualize our rolling factor coefficients (possibly a good subject for next time).
+Remember that we ran the regression on the `Financials` and `Energy` sectors but we have monthly returns for several more ETFs. We could expand this work by filtering on a different sector or by adding more custom factors to the data frame before running the regression - that would probably require creating the factors and making sure the dates align. We could also convert our regression model to a rolling regression, to see where we might have missed any significant regime or market shifts, and then visualize our rolling factor coefficients.
 
-We hope that this short note on Reproducible Finance was an interesting glimpse into the world of R coding, date wrangling and modeling with disparate data sets. Thanks for reading and see you next time. 
+
+Now let's take our same data object, holding monthly returns and factor data, and examine how we could run it through a resampling and machine learning workflow. We will start by reducing the data down to just the financials sector.
+
+```{r}
+financials_factor_data <- 
+sector_factor_data_joined %>%
+  filter(sector == "Financials")
+```
+
+Next, we want to prepare this 17 years of data to be run through a random forest model and then assess how well that model can fit the factor data to the monthly returns.  This is frequently done by k-fold cross validation but since we are working with time series data, we will use a time-aware technique for subsetting this data into training and test sets. We will turn to the `rsample` package for this work and use the `rolling_origin` function to create several training and the testing sets, though `rsample` labels them as `analysis` and `assessment` sets.  
+
+We have monthly data from 2000 to 2017, so let's create analysis sets of 6 months and assessment sets of 1 month. In other words, we will run our model on 6 months of data and test how accurately the model results fit the next month. To accomplish that, the `rolling_origin()` function needs a few arguments set. We first set `data` to be `financials_factor_data` Then we assign `initial` to be `6` - this tells the function that the size of our first sample is 6 months. Our first chunk of `analysis` data will be the first 6 months of financial sector returns. Next we assign `assess` to be `1` - this tells the function that our `assessment` data is the 1 month of sector returns following those 6 months. Finally, we set `cumulative` to be `FALSE` - this tells the functions that each of splits is 6 months The first split is the first 6 months. If we were to set `cumulative = TRUE`, the first split would be 6 months. The next split would be 7 months, the next split would be 8 months. And so on. The `analysis` split months would be accumulating. For now, we will leave it at `cumulative = FALSE`.
+
+```{r}
+library(rsample)
+
+financials_splits_2000_2017 <- 
+ rolling_origin(
+  data       = financials_factor_data,
+  initial    = 6,
+  assess     = 1,
+  cumulative = FALSE
+)
+
+financials_splits_2000_2017 %>% 
+  head()
+```
+
+Look at an individual split.
+
+```{r}
+ 
+  financials_splits_2000_2017$splits[[1]]
+
+```
+
+That `6` is telling us there are 6 months in the `analysis` set; that `1` is telling us that there is 1 month in our `assessment` data.
+
+Here is the `analysis` subset of that split - it is 6 observations of monthly data.
+
+```{r}
+analysis(financials_splits_2000_2017$splits[[1]]) %>% 
+  select(date, monthly_return)
+```
+
+
+And the `assessment` subset - this is 1 month (specifically, it's the 7th month of our data).
+
+```{r}
+assessment(financials_splits_2000_2017$splits[[1]]) %>% 
+  select(date, monthly_return)
+
+```
+
+Now we can start using that collection of data splits to fit and then assess our model and that means it's time to introduce a relatively new addition to the R toolchain, the `parsnip` package.
+
+`parsnip` is a unified model interface that allows us to create a model specification, set an analytical engine and then fit a model. It's a 'unified' interface in the sense that we can use the same scaffolding but insert different models, or different engines, or different modes. We will see how that works by toggling from a random forest regression model to a random forest classification model.  
+
+We will go with `ranger` as the engine for our random forest model though it would be simple to change over to a different engine, such as the `randomForest` package.
+
+To set up our model in `parsnip`, we first use `rand_forest(mode = "regression", mtry = 3, trees = 100)` to create the specification, `set_engine("ranger")` to set the engine as the `ranger` package, and `fit(monthly_return ~ MKT + SMB + HML + RMW + CMA ~ , data = analysis(financials_splits_2000_2017$splits[[1]]))` to fit the 5-factor Fama French model to the 6-month sample in our first split. 
+
+```{r}
+library(parsnip)
+# Need to load the packages to be used as the random forest engine
+library(ranger)
+
+rand_forest(mode = "regression", mtry = 3, trees = 100) %>%
+  set_engine("ranger") %>%
+  fit(monthly_return ~ MKT + SMB + HML + RMW + CMA, 
+      data = analysis(financials_splits_2000_2017$splits[[1]]))
+      
+```
+
+Notice that `ranger` gives us an `MSE` value as part of its return. `parsnip` returns to us what the underlying engine returns.
+
+Now, let's apply that random forest regression to all 210 of our splits, so we can get an average RMSE.
+
+To do so, we create a function that takes one split, passes it to our `parsnip` enabled model, and then uses the `predict` function to attemtp to predict our `assessment` split.  The function also allows us to specify the number of trees and the number of variables randomly sampled at each tree split, which is set with the `mtry` argument.
+
+```{r}
+
+rf_regress <- function(mtry = 3, trees = 5, split){
+    
+    analysis_set_rf <- analysis(split)
+     
+    model <- 
+      rand_forest(mtry = mtry, trees = trees) %>%
+        set_engine("ranger", importance = 'impurity') %>%
+        fit(monthly_return ~ MKT + SMB + HML + RMW + CMA, data = analysis_set_rf)
+
+    
+    assessment_set_rf <- assessment(split)
+
+
+    assessment_set_rf %>%
+      select(monthly_return) %>%
+      mutate(.pred = unlist(predict(model, new_data = assessment_set_rf))) %>% 
+      select(monthly_return, .pred)
+   
+}
+
+```
+
+Now we want to pass it our object of 210 splits, `financials_splits_2000_2017`, and we want the function to iterate over each split. For that we turn to `map_df()` from the `purrr` package, which allows us to iterate over the data object and return a data frame. `map_df()` takes the data as an argument and the function as an argument.
+
+```{r}
+results_rf <- map_df(.x = financials_splits_2000_2017$splits,
+                      ~rf_regress(mtry = 3, trees = 200, split = .x))
+```
+
+Here are the results. We now have 210 predictions.
+
+```{r}
+results_rf %>% 
+  head()
+```
+
+It's not necessary but I like to add the date of each prediction to the data as well. We'll create a function called `get_prediction_date()` and then apply it to the data.
+
+```{r}
+get_prediction_date <- function(x) 
+  min(assessment(x)$date)
+
+results_rf %>% 
+  mutate(pred_date = map(financials_splits_2000_2017$splits, get_prediction_date) %>% reduce(c)) %>%
+  select(pred_date, everything()) %>% 
+  head()
+```
+
+Now we can use the `rmse()` function from `yardstick` to calculate the root mean-squared error each of our predictions. We can find the average rmse by calling `summarise(avg_rmse = mean(.estimate))`.
+
+```{r}
+library(yardstick)
+results_rf %>%
+  mutate(pred_date = map(financials_splits_2000_2017$splits, get_prediction_date) %>% reduce(c)) %>%
+  select(pred_date, everything()) %>%
+  group_by(pred_date) %>% 
+  rmse(monthly_return, .pred) %>% 
+  summarise(avg_rmse = mean(.estimate))
+```
+
+
+```{r}
+financials_factor_data_labeled <- 
+  financials_factor_data %>% 
+  mutate(label = case_when(monthly_return > 0 ~ "positive",
+                           monthly_return <= 0 ~ "negative"))
+
+
+fin_labeled_splits_2000_2017 <- 
+ rolling_origin(
+  data       = financials_factor_data_labeled,
+  initial    = 6,
+  assess     = 1,
+  cumulative = FALSE
+)
+
+fin_labeled_splits_2000_2017
+```
+
+```{r}
+rf_class_mod <- 
+rand_forest(mode = "classification", mtry = 3, trees = 100) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  fit(label ~ MKT + SMB + HML + RMW + CMA, 
+      data = analysis(fin_labeled_splits_2000_2017$splits[[10]]))
+
+predict(rf_class_mod, new_data = assessment(fin_labeled_splits_2000_2017$splits[[1]]), type = "prob")
+```
+
+
+```{r}
+
+rf_class<- function(mtry = 3, trees = 5, split, id){
+    
+    analysis_set_rf <- analysis(split)
+     
+    model <- 
+      rand_forest(mode = "classification",, mtry = mtry, trees = trees) %>%
+        set_engine("ranger", importance = 'impurity') %>%
+        fit(label ~ MKT + SMB + HML + RMW + CMA, data = analysis_set_rf)
+
+    
+    assessment_set_rf <- assessment(split)
+
+assessment_set_rf %>% 
+  bind_cols(
+   predict(model, new_data = assessment_set_rf, type = "prob")
+  )
+}
+
+```
+
+
+```{r}
+results_rf_class <- map2_df(.x = fin_labeled_splits_2000_2017$splits,
+                      .y = fin_labeled_splits_2000_2017$id,
+                      ~rf_class(mtry = 3, trees = 200, split = .x, id = .y))
+
+results_rf_class %>% 
+  select(date, monthly_return, label, .pred_negative, .pred_positive)
+```
+

@@ -1,0 +1,66 @@
+---
+title: "sector correlations csv notebook"
+output: html_notebook
+---
+
+
+
+```{r setup, include = FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, comment = NA)
+library(tidyverse)
+library(tidyquant)
+library(riingo)
+library(timetk)
+library(openxlsx)
+library(tibbletime)
+
+riingo_set_token("")
+```
+
+
+```{r}
+
+etf_ticker_sector <- tibble(
+  ticker = c("XLY", "XLP", "XLE",	
+          "XLF", "XLV",	"XLI", "XLB", 
+          "XLK", "XLU",  "SPY"),	
+  sector = c("Consumer Discretionary", "Consumer Staples", "Energy", 
+          "Financials", "Health Care", "Industrials", "Materials", 
+          "Information Technology", "Utilities", "Market")
+)
+
+```
+
+
+```{r}
+
+sector_prices_2000_2018 <- 
+  etf_ticker_sector %>%
+  pull(ticker) %>% 
+  riingo_prices(., 
+                start_date = "1999-12-29",
+                end_date = "2018-12-31") %>%
+  mutate(date = ymd(date)) %>%
+  left_join(etf_ticker_sector, by = "ticker") %>% 
+  select(date, sector, ticker, adjClose) %>%
+  group_by(sector)
+
+sector_prices_2000_2018_xls <- "sector_prices_2000_2018.xlsx"
+
+sector_prices_2000_2018_csv <- "sector_prices_2000_2018.csv"
+
+write.xlsx(sector_prices_2000_2018, file = sector_prices_2000_2018_xls)
+
+write_csv(sector_prices_2000_2018, path = sector_prices_2000_2018_csv)
+
+rmarkdown::output_metadata$set(rsc_output_files = list(sector_prices_2000_2018_xls, sector_prices_2000_2018_csv))
+```
+
+[Link to csv](`r sector_prices_2000_2018_csv`)
+
+[Link to xls](`r sector_prices_2000_2018_xls`)
+
+```{r}
+rmarkdown::output_metadata$set(rsc_email_attachments = list(sector_prices_2000_2018_xls, sector_prices_2000_2018_csv))
+```
+

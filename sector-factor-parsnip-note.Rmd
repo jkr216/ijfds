@@ -7,8 +7,6 @@ output:
 
 
 ```{r setup, include = FALSE, message=FALSE, warning=FALSE}
-
-
 knitr::opts_chunk$set(message=FALSE, warning=FALSE, comment = NA)
 library(tidyverse)
 library(broom)
@@ -99,6 +97,20 @@ sector_monthly_returns_2000_2018 %>%
 ```
 
 We now have monthly returns for our sectors, starting in January of 2000, saved in a data object called `sector_monthly_returns_2000_2018`.
+
+Let's split this into data for 2000 - 2017 and for 2018, in case we need a hold out set for validation later. 
+
+```{r}
+sector_monthly_returns_2000_2017 <- 
+  sector_monthly_returns_2000_2018 %>% 
+  filter(date < "2018-01-01")
+
+sector_monthly_returns_2018 <- 
+  sector_monthly_returns_2000_2018 %>% 
+  filter(date >= "2018-01-01")
+```
+
+
 Next we need to import the Fama French (FF) factor data and, luckily, FF make their factor data available on their website.[^2]
 
 [^2]: http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
@@ -122,8 +134,23 @@ Next we unzip that data with the `unz()` function read and the csv file using `r
 
 ```{r}
 Global_5_Factors <- 
-  read_csv(unz(temp, "Global_5_Factors.csv"), skip =6) %>%
+ read_csv(
+    file = unz(temp, "Global_5_Factors.csv"), 
+    skip = 6, 
+    # how to force column types
+    col_types = cols(
+      `Mkt-RF` = col_number(),
+      SMB = col_number(),
+      HML = col_number(),
+      RMW = col_number(),
+      CMA = col_number(),
+      RF = col_number()
+    )) %>% 
   rename(date = X1)
+
+print(tail(Global_5_Factors, n = 50), n = 50)
+
+# Need to clean up the data for some reason there's annual factors in here too
 ```
 
 That loads the data into our environment but we need to do some wrangling to get this raw data into a format that we can join with our monthly returns data. When joining disparate financial data sets, we often need to use the date column and that means ensuring a common format.
@@ -154,8 +181,8 @@ We coerce our character columns to numeric columns with `mutate_if(is.character,
 Global_5_Factors_for_join <- 
   Global_5_Factors %>%
   mutate(date = ymd(parse_date_time(date, "%Y%m"))) %>% 
-  mutate_if(is.character, as.numeric) %>% 
-  mutate_if(is.numeric, funs(. / 100)) %>%
+ # mutate_if(is.character, as.numeric) %>% 
+  mutate_if(is.numeric, list(~. / 100)) %>%
   mutate(date = ceiling_date(date, unit = "month") - days(1)) %>% 
   rename(MKT = `Mkt-RF`)
 
@@ -169,7 +196,7 @@ We now have the Fama French factor cleaned and saved in an object called `Global
 
 ```{r}
 sector_factor_data_joined <- 
-sector_monthly_returns_2000_2018 %>% 
+sector_monthly_returns_2000_2017 %>% 
   left_join(Global_5_Factors_for_join, by = "date")
 ```
 
@@ -238,8 +265,7 @@ If we wish to chart both sectors, we can use `facet_wrap(~sector)` to create two
 
 ```{r}
 ff_results %>% 
-filter(
-         factor != "(Intercept)") %>% 
+filter(factor != "(Intercept)") %>% 
   ggplot(aes(x = factor, 
              y = coefficient, 
              shape = factor, 
@@ -254,10 +280,146 @@ filter(
   theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5),
         plot.caption  = element_text(hjust = 0),
-        panel.spacing = unit(2, "lines")) +
+        panel.spacing = unit(2, "lines"),
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
   facet_wrap(~sector) 
 ```
 
-Remember that we ran the regression on the `Financials` and `Energy` sectors but we have monthly returns for several more ETFs. We could expand this work by filtering on a different sector or by adding more custom factors to the data frame before running the regression - that would probably require creating the factors and making sure the dates align. We could also convert our regression model to a rolling regression, to see where we might have missed any significant regime or market shifts, and then visualize our rolling factor coefficients (possibly a good subject for next time).
+Remember that we ran the regression on the `Financials` and `Energy` sectors but we have monthly returns for several more ETFs. We could expand this work by filtering on a different sector or by adding more custom factors to the data frame before running the regression - that would probably require creating the factors and making sure the dates align. We could also convert our regression model to a rolling regression, to see where we might have missed any significant regime or market shifts, and then visualize our rolling factor coefficients.
 
-We hope that this short note on Reproducible Finance was an interesting glimpse into the world of R coding, date wrangling and modeling with disparate data sets. Thanks for reading and see you next time. 
+
+Now let's move beyond the world of linear regression and examine how we could run our same monthly returns and factor data through a resampling and machine learning workflow. To do so, we will use three packages -  `parsnip`, `rsample` and `yardstick` - which are part of a new collection of packages called `tidymodels`. There is a lot to explore in `tidymodels` and we will just scratch the surface today.
+
+Let's get started by reducing the data down to only the financials sector.
+
+```{r}
+financials_factor_data <- 
+sector_factor_data_joined %>%
+  filter(sector == "Financials")
+```
+
+Next, we resample this 17 years of data into smaller subsets of training and testing sets.  This is frequently done by k-fold cross validation, where random samples are taken from the data, but since we are working with time series, we will use a time-aware technique.  The `rsample` package has a function for exactly this purpose, the `rolling_origin` function. We will that function to create several training andtesting sets, though `rsample` labels them as `analysis` and `assessment` sets.  
+
+We have monthly data from 2000 to 2017, so let's create analysis sets of 6 months and assessment sets of 1 month. In other words, we will run our model on 6 months of data and test how accurately the model results fit the next month. To accomplish that, the `rolling_origin()` function needs a few arguments.  We first set `data` to be `financials_factor_data` Then we assign `initial` to be `6` - this tells the function that the size of our first sample is 6 months. Our first chunk of `analysis` data will be the first 6 months of financial sector returns. Next we assign `assess` to be `1` - this tells the function that our `assessment` data is the 1 month of sector returns following those 6 months. Finally, we set `cumulative` to be `FALSE` - this tells the functions that each of splits is 6 months The first split is the first 6 months. If we were to set `cumulative = TRUE`, the first split would be 6 months. The next split would be 7 months, the next split would be 8 months. And so on. The `analysis` split months would be accumulating. For now, we will leave it at `cumulative = FALSE`.
+
+```{r}
+library(rsample)
+
+financials_splits_2000_2017 <- 
+ rolling_origin(
+  data       = financials_factor_data,
+  initial    = 6,
+  assess     = 1,
+  cumulative = FALSE
+)
+
+financials_splits_2000_2017 %>% 
+  head()
+```
+
+Look at an individual split.
+
+```{r}
+ 
+  financials_splits_2000_2017$splits[[1]]
+
+```
+
+That `6` is telling us there are 6 months in the `analysis` set; that `1` is telling us that there is 1 month in our `assessment` data. The `216` is telling us there were 216 months in our original data set. Since we are using 6 months of data as our training data, we now have 210 splits.
+
+Here is the `analysis` subset of that first split - it is 6 observations of monthly returns.
+
+```{r}
+analysis(financials_splits_2000_2017$splits[[1]]) %>% 
+  select(date, monthly_return)
+```
+
+
+And here is the `assessment` subset - this is 1 month (specifically, it's the 7th month of our data since this is the first split).
+
+```{r}
+assessment(financials_splits_2000_2017$splits[[1]]) %>% 
+  select(date, monthly_return)
+
+```
+
+Now we can start using that collection of data splits to fit and then assess our model.  That means it's time to introduce a relatively new addition to the R toolchain, the `parsnip` package.
+
+`parsnip` is a unified model interface that allows us to create a model specification, set an analytical engine and then fit a model. It's a 'unified' interface in the sense that we can use the same scaffolding but insert different models, or different engines, or different modes.   
+
+We will select the `ranger` package as the engine for our random forest model though it would be simple to change over to a different engine, such as the `randomForest` package.
+
+To set up our model in `parsnip`, we first use `rand_forest(mode = "regression", mtry = 3, trees = 100)` to create the specification, `set_engine("ranger")` to set the engine as the `ranger` package, and `fit(monthly_return ~ MKT + SMB + HML + RMW + CMA ~ , data = analysis(financials_splits_2000_2017$splits[[1]]))` to fit the 5-factor Fama French model to the 6-month sample in our first split. 
+
+```{r}
+library(parsnip)
+# Need to load the packages to be used as the random forest engine
+library(ranger)
+
+rand_forest(mode = "regression", mtry = 3, trees = 100) %>%
+  set_engine("ranger") %>%
+  fit(monthly_return ~ MKT + SMB + HML + RMW + CMA, 
+      data = analysis(financials_splits_2000_2017$splits[[1]]))
+      
+```
+
+Notice that `ranger` gives us an `MSE` value as part of its return. `parsnip` returns to us what the underlying engine returns.
+
+Now, let's apply that random forest regression to all 210 of our splits (recall that each split consists of 6 months of training data and 1 month of test data), so we can get an average RMSE.
+
+To apply that model to our entire data set, we create a function that takes one split, passes it to our `parsnip` enabled model, and then uses the `predict` function to attemtp to predict our `assessment` split.  The function also allows us to specify the number of trees and the number of variables randomly sampled at each tree split, which is set with the `mtry` argument.
+
+```{r}
+
+rf_regress <- function(mtry = 3, trees = 5, split){
+    
+    analysis_set_rf <- analysis(split)
+     
+    model <- 
+      rand_forest(mtry = mtry, trees = trees) %>%
+        set_engine("ranger", importance = 'impurity') %>%
+        fit(monthly_return ~ MKT + SMB + HML + RMW + CMA, data = analysis_set_rf)
+
+    
+    assessment_set_rf <- assessment(split)
+
+
+    assessment_set_rf %>%
+      select(date, monthly_return) %>%
+      mutate(.pred = unlist(predict(model, new_data = assessment_set_rf))) %>% 
+      select(date, monthly_return, .pred)
+   
+}
+
+```
+
+Now we want to pass it our object of 210 splits, `financials_splits_2000_2017`, and we want the function to iterate over each split. For that we turn to `map_df()` from the `purrr` package, which allows us to iterate over the data object and return a data frame. `map_df()` takes the data as an argument and our function as an argument.
+
+```{r}
+results_rf <- 
+  map_df(.x = financials_splits_2000_2017$splits,
+         ~rf_regress(mtry = 3, trees = 200, split = .x))
+```
+
+Here are the results. We now have 210 predictions.
+
+```{r}
+results_rf %>% 
+  head()
+```
+
+Notice how the date of each prediction is included.
+
+Now we can use the `rmse()` function from `yardstick` to calculate the root mean-squared error each of our predictions (our test sets had only one observation in them because we were testing on one month, so the RMSE is not a complex calculation here, but it would be the same code pattern if we had a larger sized test set). We can then find the average rmse by calling `summarise(avg_rmse = mean(.estimate))`.
+
+```{r}
+library(yardstick)
+results_rf %>%
+  mutate(pred_date = map(financials_splits_2000_2017$splits, get_prediction_date) %>% reduce(c)) %>%
+  select(pred_date, everything()) %>%
+  group_by(pred_date) %>% 
+  rmse(monthly_return, .pred) %>% 
+  summarise(avg_rmse = mean(.estimate))
+```
+
+The power of `parsnip` is that we can quickly toggle to other model interfaces, such as `boost_tree()`, `decision_tree()`, or `mars()` and keep much the same workflow.  That's all for today and thanks for reading this note on Reproducible Finance.
